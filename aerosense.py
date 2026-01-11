@@ -538,7 +538,6 @@ def main():
                             response = model.generate_content(prompt)
                             st.markdown("<br>", unsafe_allow_html=True)
                             st.markdown("### 💡 AI-Generated Recommendations")
-                            st.markdown("<div class='health-info'>", unsafe_allow_html=True)
                             st.write(response.text)
                             st.markdown("</div>", unsafe_allow_html=True)
                             st.session_state.show_detailed_insights=True
@@ -558,8 +557,7 @@ def main():
                         try:
                             follow_up_response = model.generate_content(follow_up_prompt)
                             st.markdown("<br>", unsafe_allow_html=True)
-                            st.markdown("### 📝 Detailed Answer")
-                            st.markdown("<div class='health-info'>", unsafe_allow_html=True)
+                            st.markdown("### 🧭 Detailed Answer")
                             st.write(follow_up_response.text)
                             st.markdown("</div>", unsafe_allow_html=True)
                         except Exception as e:
