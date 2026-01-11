@@ -294,13 +294,15 @@
     padding: 0.75rem 1.5rem;
     transition: all 0.3s ease;
     border: 2px solid #000000 !important;
-    background: white;
+    background: white !important;
+    color: #000000 !important;
 }
 
 .stButton>button:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
     border: 2px solid #000000 !important;
+    color: #000000 !important;
 }
 
 /* Search Bar Styling */
