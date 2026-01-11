@@ -1,5 +1,4 @@
 import streamlit as st
-from streamlit_geolocation import streamlit_geolocation
 import numpy as np
 import pandas as pd
 import joblib
@@ -9,6 +8,7 @@ from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 import google.generativeai as genai
 import requests
+import re
 
 genai.configure(api_key=st.secrets["API_KEY"])
 model = genai.GenerativeModel(model_name=st.secrets["MODEL_NAME"])
@@ -31,62 +31,64 @@ def predict_aqi(input_values, nn_model, xgb_model, rf_model, scaler):
     ensemble_pred = (nn_pred + xgb_pred + rf_pred) / 3
     return ensemble_pred
 
-def fetch_aqi_from_coords(lat, lon):
+def search_aqi_location(location):
     try:
-        url = st.secrets["WEATHER_URL"].format(lat=lat, lon=lon)
-        response = requests.get(url, timeout=10)
+        search_url = f"{st.secrets['SEARCH_URL']}/{location}"
+        response = requests.get(search_url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        if 'list' in data and len(data['list']) > 0:
-            aqi_index = data['list'][0]['main']['aqi']
-            components = data['list'][0]['components']
-            aqi = convert_to_aqi(aqi_index, components)
-            return aqi, components
-        else:
-            return None, None
+        if 'results' in data and len(data['results']) > 0:
+            stations = []
+            for result in data['results']:
+                if 's' in result and 'a' in result['s'] and result['s']['a'] != '-':
+                    station = {
+                        'aqi': result['s']['a'],
+                        'name': result['s']['n'][0] if result['s']['n'] else result['n'][0],
+                        'url': result['s'].get('u', ''),
+                        'location': result['n'][-1] if len(result['n']) > 1 else result['n'][0]
+                    }
+                    
+                    if station['url']:
+                        match = re.search(r'@(\d+)', station['url'])
+                        if match:
+                            station['station_id'] = 'A' + match.group(1)
+                            stations.append(station)
+            
+            return stations
+        return []
+    except Exception as e:
+        st.error(f"Error searching location: {str(e)}")
+        return []
+
+def fetch_aqi_from_station(station_id):
+    try:
+        token = st.secrets["AQI_TOKEN"]
+        feed_url = f"{st.secrets['FEED_URL']}/{station_id}/?token={token}"
+        response = requests.get(feed_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data['status'] == 'ok' and 'data' in data:
+            aqi_data = data['data']
+            return {
+                'aqi': aqi_data.get('aqi', 0),
+                'city': aqi_data.get('city', {}).get('name', ''),
+                'location': aqi_data.get('city', {}).get('location', ''),
+                'dominentpol': aqi_data.get('dominentpol', ''),
+                'components': aqi_data.get('iaqi', {}),
+                'time': aqi_data.get('time', {}).get('s', '')
+            }
+        return None
     except Exception as e:
         st.error(f"Error fetching AQI data: {str(e)}")
-        return None, None
-
-# OpenWeather scale for Air Quality Index levels
-def convert_to_aqi(owm_index, components):
-    pm25 = components.get('pm2_5', 0)
-    pm10 = components.get('pm10', 0)
-    no2 = components.get('no2', 0)
-    so2 = components.get('so2', 0)
-    co = components.get('co', 0)
-    o3 = components.get('o3', 0)
-    
-    def calc_sub_index(conc, breakpoints):
-        for (c_low, c_high, i_low, i_high) in breakpoints:
-            if c_low <= conc <= c_high:
-                return ((i_high - i_low) / (c_high - c_low)) * (conc - c_low) + i_low
-        return breakpoints[-1][3]
-    
-    pm25_bp = [(0, 30, 0, 50), (31, 60, 51, 100), (61, 90, 101, 200), (91, 120, 201, 300), (121, 250, 301, 400), (251, 500, 401, 500)]
-    pm10_bp = [(0, 50, 0, 50), (51, 100, 51, 100), (101, 250, 101, 200), (251, 350, 201, 300), (351, 430, 301, 400), (431, 600, 401, 500)]
-    no2_bp = [(0, 40, 0, 50), (41, 80, 51, 100), (81, 180, 101, 200), (181, 280, 201, 300), (281, 400, 301, 400), (401, 800, 401, 500)]
-    so2_bp = [(0, 40, 0, 50), (41, 80, 51, 100), (81, 380, 101, 200), (381, 800, 201, 300), (801, 1600, 301, 400), (1601, 2400, 401, 500)]
-    co_bp = [(0, 1000, 0, 50), (1001, 2000, 51, 100), (2001, 10000, 101, 200), (10001, 17000, 201, 300), (17001, 34000, 301, 400), (34001, 50000, 401, 500)]
-    o3_bp = [(0, 50, 0, 50), (51, 100, 51, 100), (101, 168, 101, 200), (169, 208, 201, 300), (209, 748, 301, 400), (749, 1000, 401, 500)]
-    
-    sub_indices = [
-        calc_sub_index(pm25, pm25_bp),
-        calc_sub_index(pm10, pm10_bp),
-        calc_sub_index(no2, no2_bp),
-        calc_sub_index(so2, so2_bp),
-        calc_sub_index(co, co_bp),
-        calc_sub_index(o3, o3_bp)
-    ]
-    
-    return int(max(sub_indices))
+        return None
 
 def construct_prompt(aqi, answers, follow_up_query=None, detailed=False):
     if aqi <= 50:
         category = "Good"
     elif aqi <= 100:
-        category = "Fair"
+        category = "Satisfactory"
     elif aqi <= 200:
         category = "Moderate"
     elif aqi <= 300:
@@ -97,35 +99,57 @@ def construct_prompt(aqi, answers, follow_up_query=None, detailed=False):
         category = "Severe"
     aqi_description = f"AQI: {aqi} ({category}) on AQI scale (0-500)"
     
-    prompt = f"""
-    The current Air Quality: {aqi_description}, indicating a level of air pollution. Below are the key environmental factors:
-
-    - Traffic Intensity: {answers['traffic']}
-    - Proximity of Industrial Zones: {answers['industrial']}
-    - Green Cover: {answers['green_cover']}
-    - Climate Change Mitigation Initiatives: {answers['climate_initiatives']}
-    - Zoning and Development: {'Mixed zoning (Residential + Commercial)' if answers['zoning'] == 'Yes' else 'Single-use zoning'}
-
-    - Significant Environmental Challenge: {answers['environmental_challenge']}
-    - Recent Initiatives or Unique Aspects: {answers['area_initiatives']}
-
-    """
+    zoning_text = 'Mixed zoning (Residential + Commercial)' if answers['zoning'] == 'Yes' else 'Single-use zoning'
+    
+    prompt = st.secrets["BASE_PROMPT"].format(
+        aqi_description=aqi_description,
+        traffic=answers['traffic'],
+        industrial=answers['industrial'],
+        green_cover=answers['green_cover'],
+        climate_initiatives=answers['climate_initiatives'],
+        zoning=zoning_text,
+        environmental_challenge=answers['environmental_challenge'],
+        area_initiatives=answers['area_initiatives']
+    )
+    
     if detailed and follow_up_query:
-        prompt = f"{prompt}\n\nAdditional Query: {follow_up_query}\nProvide further insights or details in response."
+        prompt = f"{prompt}\n\n{st.secrets['FOLLOWUP_PROMPT'].format(follow_up_query=follow_up_query)}"
     else:
-        prompt = f"{prompt}\n\nBased on this context, provide concise and actionable recommendations to improve air quality, enhance sustainability, and promote public health. Keep the suggestions brief and easy to understand for quick implementation."
+        prompt = f"{prompt}\n\n{st.secrets['RECOMMENDATION_PROMPT']}"
     return prompt
+
+def get_pollutant_class(value):
+    """Determine CSS class based on pollutant value (AQI sub-index)"""
+    try:
+        val = float(value)
+        if val <= 50:
+            return "aqi-card-good"
+        elif val <= 100:
+            return "aqi-card-moderate"
+        elif val <= 150:
+            return "aqi-card-usg"
+        elif val <= 200:
+            return "aqi-card-unhealthy"
+        elif val <= 300:
+            return "aqi-card-very-unhealthy"
+        else:
+            return "aqi-card-hazardous"
+    except:
+        return "aqi-card"
 
 def main():
     st.set_page_config(page_title="AeroSense", page_icon="🌍", layout="wide")
 
+    # Load external CSS
+    with open('assets/style.css') as f:
+        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
     st.markdown(
     """
-    <div style="text-align: center;">
+    <div class="main-header">
         <h1>🌍 AeroSense: Air Quality Intelligence</h1>
-        <p>Transforming cities with AI-driven recommendations to combat air pollution, improve sustainability, and enhance public health.</p>
+        <p>Transforming cities to combat air pollution, improve sustainability, and enhance public health.</p>
     </div>
-    <br>
     """,
     unsafe_allow_html=True
     )
@@ -139,19 +163,36 @@ def main():
         st.session_state.option = "Predict AQI from Input Parameters"
         st.session_state.show_detailed_insights = False
         st.session_state.location_filled = False
+        st.session_state.scroll_to_aqi = False
+        st.session_state.scroll_to_results = False
     
-    option = st.radio("How would you like to proceed?", 
-                      options=["Predict AQI from Input Parameters", "Fetch AQI from Location"], 
-                      index=0)
+    st.markdown("<br>", unsafe_allow_html=True)
+    option = st.radio(
+        "**How would you like to proceed?**", 
+        options=["Predict AQI from Input Parameters", "Fetch AQI from Location"], 
+        index=0,
+        horizontal=True
+    )
 
     if option != st.session_state.option:
         st.session_state.aqi_predicted = False
         st.session_state.predicted_aqi = None
         st.session_state.answers = {}
         st.session_state.option = option
+        # Clear location-specific data when switching options
+        if hasattr(st.session_state, 'aqi_city'):
+            delattr(st.session_state, 'aqi_city')
+        if hasattr(st.session_state, 'aqi_location'):
+            delattr(st.session_state, 'aqi_location')
+        if hasattr(st.session_state, 'aqi_components'):
+            delattr(st.session_state, 'aqi_components')
     
     if option == "Predict AQI from Input Parameters" and not st.session_state.aqi_predicted:
-        with st.expander("Input Parameters for AQI Prediction", expanded=not st.session_state.aqi_predicted):
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("📊 Input Parameters for AQI Prediction", expanded=not st.session_state.aqi_predicted):
+            st.markdown("**Enter Environmental Parameters**")
+            st.caption("Provide accurate measurements for precise AQI prediction(ML-powered, experimental)")
+            st.markdown("---")
             col1, col2, col3 = st.columns(3)
             with col1:
                 co_gt = st.number_input("CO(GT) - Carbon Monoxide", min_value=0.0, value=1.0)
@@ -182,226 +223,293 @@ def main():
                     predicted_aqi = predict_aqi(input_values, nn_model, xgb_model, rf_model, scaler)
                     st.session_state.aqi_predicted = True
                     st.session_state.predicted_aqi = predicted_aqi
+                    # Clear location-specific data when predicting from input
+                    if hasattr(st.session_state, 'aqi_city'):
+                        delattr(st.session_state, 'aqi_city')
+                    if hasattr(st.session_state, 'aqi_location'):
+                        delattr(st.session_state, 'aqi_location')
+                    if hasattr(st.session_state, 'aqi_components'):
+                        delattr(st.session_state, 'aqi_components')
 
     elif option == "Fetch AQI from Location":
-        with st.expander("Fetch AQI from Geolocation or Manual Coordinates", expanded=not st.session_state.aqi_predicted):
-            st.markdown("### 🌐 Get Air Quality Data")
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("🔍 Search Location for AQI Data", expanded=not st.session_state.aqi_predicted):
+            st.markdown("**🌍 Find your Region**")
+            st.caption("Enter a city name or location to find nearby air quality monitoring stations")
+            st.markdown("<br>", unsafe_allow_html=True)
             
-            if 'manual_aqi_value' not in st.session_state:
-                st.session_state.manual_aqi_value = 0.0
-            if 'manual_lat' not in st.session_state:
-                st.session_state.manual_lat = 0.0
-            if 'manual_lon' not in st.session_state:
-                st.session_state.manual_lon = 0.0
-            if 'location_method' not in st.session_state:
-                st.session_state.location_method = "auto"
+            if 'selected_station' not in st.session_state:
+                st.session_state.selected_station = None
+            if 'search_results' not in st.session_state:
+                st.session_state.search_results = []
+            if 'last_search_term' not in st.session_state:
+                st.session_state.last_search_term = ""
             
-            col_auto, col_manual = st.columns(2)
-            with col_auto:
-                auto_selected = st.session_state.location_method == "auto"
-                if st.button(
-                    "🌍 Auto-Detect Location", 
-                    use_container_width=True, 
-                    type="primary" if auto_selected else "secondary",
-                    key="btn_auto"
-                ):
-                    if st.session_state.location_method != "auto":
-                        st.session_state.location_method = "auto"
-                        st.session_state.aqi_predicted = False
-                        st.session_state.predicted_aqi = None
-                        st.session_state.show_detailed_insights = False
-                        st.rerun()
+            location_search = st.text_input(
+                "Location",
+                placeholder="🌆 Type a city name (e.g., Mumbai, Delhi, Bangalore) and press Enter...",
+                key="location_search",
+                label_visibility="collapsed"
+            )
             
-            with col_manual:
-                manual_selected = st.session_state.location_method == "manual"
-                if st.button(
-                    "📍 Manual Coordinates", 
-                    use_container_width=True, 
-                    type="primary" if manual_selected else "secondary",
-                    key="btn_manual"
-                ):
-                    if st.session_state.location_method != "manual":
-                        st.session_state.location_method = "manual"
-                        st.session_state.aqi_predicted = False
-                        st.session_state.predicted_aqi = None
-                        st.session_state.show_detailed_insights = False
-                        st.rerun()
+            st.markdown("<br>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([2, 1, 2])
+            with col2:
+                search_button = st.button("🔍 Search Location", use_container_width=True, type="primary")
             
-            st.markdown("---")
+            st.markdown("</div>", unsafe_allow_html=True)
             
-            if st.session_state.location_method == "auto":
-                st.caption("⚠️ You must allow location access when prompted by your browser")
-                
-                st.markdown("#### 📍 Step 1: Get Your Location")
-                location = streamlit_geolocation()
-                
-                if location and location.get('latitude') is not None and location.get('longitude') is not None:
-                    lat = location['latitude']
-                    lon = location['longitude']
-                    
-                    st.success(f"✅ **Location Detected!**\n\n📍 Latitude: {lat:.6f}° | Longitude: {lon:.6f}°")
-                    
-                    st.markdown("#### 🌍 Step 2: Fetch Air Quality")
-                    if st.button("🌍 Fetch AQI for My Location", use_container_width=True, type="primary", key="fetch_geo_aqi"):
-                        with st.spinner('🌍 Fetching air quality data from WeatherMap...'):
-                            fetched_aqi, components_data = fetch_aqi_from_coords(lat, lon)
-                            
-                            if fetched_aqi is not None:
-                                st.session_state.predicted_aqi = fetched_aqi
-                                st.session_state.aqi_predicted = True
-                                
-                                st.success(f"✅ **AQI: {fetched_aqi:.2f}**")
-                                
-                                if components_data:
-                                    st.markdown("### 📊 Air Quality Details")
-                                    st.caption(f"Location: {lat:.6f}°, {lon:.6f}°")
-                                    
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    with col1:
-                                        st.metric("CO", f"{components_data.get('co', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("PM2.5", f"{components_data.get('pm2_5', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col2:
-                                        st.metric("NO₂", f"{components_data.get('no2', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("PM10", f"{components_data.get('pm10', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col3:
-                                        st.metric("O₃", f"{components_data.get('o3', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("SO₂", f"{components_data.get('so2', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col4:
-                                        st.metric("NH₃", f"{components_data.get('nh3', 0):.2f}", delta="μg/m³", delta_color="off")
-                                
-                                st.markdown("---")
-                                st.info("⬇️ **Scroll down to proceed with recommendations**")
-                            else:
-                                st.error("❌ Failed to fetch AQI data. Please check your API key.")
-                else:
-                    st.warning("👆 **Click the 'Get Location' button above** to detect your coordinates, then you can fetch AQI.")
+            # Trigger search on Enter key (when location_search changes) or button click
+            should_search = (search_button and location_search) or \
+                           (location_search and location_search != st.session_state.last_search_term and location_search.strip() != "")
             
-            else:
-                st.caption("Enter latitude and longitude manually or select a city from below")
-                
-                st.markdown("#### 🏙️ Quick Select: Major Indian Cities")
-                
-                cities_data = {
-                    "Mumbai": (19.0760, 72.8777),
-                    "Delhi": (28.6139, 77.2090),
-                    "Bangalore": (12.9716, 77.5946),
-                    "Hyderabad": (17.3850, 78.4867),
-                    "Chennai": (13.0827, 80.2707),
-                    "Kolkata": (22.5726, 88.3639),
-                    "Pune": (18.5204, 73.8567),
-                    "Ahmedabad": (23.0225, 72.5714),
-                    "Jaipur": (26.9124, 75.7873),
-                    "Lucknow": (26.8467, 80.9462),
-                    "Kanpur": (26.4499, 80.3319),
-                    "Nagpur": (21.1458, 79.0882)
-                }
-                
-                city_cols = st.columns(4)
-                for idx, (city, coords) in enumerate(cities_data.items()):
-                    with city_cols[idx % 4]:
-                        if st.button(f"📍 {city}", use_container_width=True, key=f"city_{city}"):
-                            st.session_state.manual_lat = coords[0]
-                            st.session_state.manual_lon = coords[1]
-                            st.rerun()
-                
-                st.markdown("---")
-                st.markdown("#### ⌨️ Manual Entry")
-                
-                if st.session_state.manual_lat != 0.0 or st.session_state.manual_lon != 0.0:
-                    st.success(f"📍 **Selected Coordinates:** Lat: {st.session_state.manual_lat:.6f}°, Lon: {st.session_state.manual_lon:.6f}°")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    new_lat = st.number_input(
-                        "Latitude", 
-                        min_value=-90.0, 
-                        max_value=90.0, 
-                        value=float(st.session_state.manual_lat), 
-                        format="%.6f",
-                        help="Range: -90 to 90"
-                    )
-                with col2:
-                    new_lon = st.number_input(
-                        "Longitude", 
-                        min_value=-180.0, 
-                        max_value=180.0, 
-                        value=float(st.session_state.manual_lon), 
-                        format="%.6f",
-                        help="Range: -180 to 180"
-                    )
-                
-                st.session_state.manual_lat = new_lat
-                st.session_state.manual_lon = new_lon
-                
-                st.markdown("---")
-                if st.button("🌍 Fetch AQI with These Coordinates", use_container_width=True, type="primary", key="fetch_manual_aqi"):
-                    if new_lat != 0.0 or new_lon != 0.0:
-                        with st.spinner('🌍 Fetching air quality data from WeatherMap...'):
-                            fetched_aqi, components_data = fetch_aqi_from_coords(new_lat, new_lon)
-                            
-                            if fetched_aqi is not None:
-                                st.session_state.predicted_aqi = fetched_aqi
-                                st.session_state.aqi_predicted = True
-                                
-                                st.success(f"✅ **AQI: {fetched_aqi:.2f}**")
-                                
-                                if components_data:
-                                    st.markdown("### 📊 Air Quality Details")
-                                    st.caption(f"Location: {new_lat:.6f}°, {new_lon:.6f}°")
-                                    
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    with col1:
-                                        st.metric("CO", f"{components_data.get('co', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("PM2.5", f"{components_data.get('pm2_5', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col2:
-                                        st.metric("NO₂", f"{components_data.get('no2', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("PM10", f"{components_data.get('pm10', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col3:
-                                        st.metric("O₃", f"{components_data.get('o3', 0):.2f}", delta="μg/m³", delta_color="off")
-                                        st.metric("SO₂", f"{components_data.get('so2', 0):.2f}", delta="μg/m³", delta_color="off")
-                                    with col4:
-                                        st.metric("NH₃", f"{components_data.get('nh3', 0):.2f}", delta="μg/m³", delta_color="off")
-                                
-                                st.markdown("---")
-                                st.info("⬇️ **Scroll down to proceed with recommendations**")
-                            else:
-                                st.error("❌ Failed to fetch AQI data. Please check your coordinates and try again.")
+            if should_search:
+                st.session_state.last_search_term = location_search
+                with st.spinner(f'Searching for "{location_search}"...'):
+                    stations = search_aqi_location(location_search)
+                    if stations:
+                        st.session_state.search_results = stations
+                        st.session_state.scroll_to_results = True
+                        st.success(f"Found {len(stations)} monitoring station(s)")
                     else:
-                        st.warning("⚠️ Please enter valid coordinates (both cannot be zero)")
+                        st.warning("No monitoring stations found for this location. Try a different search term.")
+            
+            if st.session_state.search_results:
+                # Add anchor for scrolling to results
+                st.markdown("<div id='search-results-section'></div>", unsafe_allow_html=True)
+                
+                # Auto-scroll to results
+                if st.session_state.get('scroll_to_results', False):
+                    import streamlit.components.v1 as components
+                    components.html(
+                        """
+                        <script>
+                            window.parent.document.getElementById('search-results-section').scrollIntoView({ 
+                                behavior: 'smooth', 
+                                block: 'start' 
+                            });
+                        </script>
+                        """,
+                        height=0
+                    )
+                    st.session_state.scroll_to_results = False
+                
+                st.markdown("---")
+                st.markdown("**📍 Available Monitoring Stations**")
+                st.caption(f"{len(st.session_state.search_results)} station(s) found")
+                
+                for idx, station in enumerate(st.session_state.search_results[:10]):
+                    col_aqi, col_name, col_btn = st.columns([1, 4, 1])
+                    
+                    with col_aqi:
+                        aqi_val = int(station['aqi'])
+                        if aqi_val <= 50:
+                            st.metric("AQI", aqi_val, delta="Good", delta_color="normal")
+                        elif aqi_val <= 100:
+                            st.metric("AQI", aqi_val, delta="Satisfactory", delta_color="normal")
+                        elif aqi_val <= 200:
+                            st.metric("AQI", aqi_val, delta="Moderate", delta_color="inverse")
+                        elif aqi_val <= 300:
+                            st.metric("AQI", aqi_val, delta="Poor", delta_color="inverse")
+                        elif aqi_val <= 400:
+                            st.metric("AQI", aqi_val, delta="Very Poor", delta_color="inverse")
+                        else:
+                            st.metric("AQI", aqi_val, delta="Severe", delta_color="inverse")
+                    
+                    with col_name:
+                        st.markdown(f"**{station['name']}**")
+                        st.caption(station['location'])
+                    
+                    with col_btn:
+                        if st.button("Select", key=f"select_station_{idx}", use_container_width=True):
+                            st.session_state.selected_station = station
+                            with st.spinner('Fetching detailed AQI data...'):
+                                detailed_data = fetch_aqi_from_station(station['station_id'])
+                                
+                                if detailed_data:
+                                    st.session_state.predicted_aqi = detailed_data['aqi']
+                                    st.session_state.aqi_predicted = True
+                                    st.session_state.aqi_components = detailed_data['components']
+                                    st.session_state.aqi_city = detailed_data['city']
+                                    st.session_state.aqi_location = detailed_data['location']
+                                    st.session_state.scroll_to_aqi = True
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to fetch detailed AQI data from this station")
+                    
+                    st.markdown("---")
 
     if st.session_state.aqi_predicted and st.session_state.predicted_aqi is not None:
+        # Add anchor for scrolling
+        st.markdown("<div id='aqi-result-section'></div>", unsafe_allow_html=True)
+        
+        # Auto-scroll using components
+        if st.session_state.get('scroll_to_aqi', False):
+            import streamlit.components.v1 as components
+            components.html(
+                """
+                <script>
+                    window.parent.document.getElementById('aqi-result-section').scrollIntoView({ 
+                        behavior: 'smooth', 
+                        block: 'start' 
+                    });
+                </script>
+                """,
+                height=0
+            )
+            st.session_state.scroll_to_aqi = False
+        
         st.markdown("---")
-        st.markdown("## 🌍 Air Quality Index Result")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Location information
+        if hasattr(st.session_state, 'aqi_city') and st.session_state.aqi_city:
+            st.markdown(f"### 📍 {st.session_state.aqi_city}")
+            if hasattr(st.session_state, 'aqi_location') and st.session_state.aqi_location:
+                st.caption(f"🗺️ {st.session_state.aqi_location}")
+        else:
+            st.markdown("### 🌍 Air Quality Index Result")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
         
         predicted_aqi = st.session_state.predicted_aqi
         
-        col1, col2 = st.columns([1, 2])
+        # Determine AQI color class
+        if predicted_aqi <= 50:
+            aqi_card_class = "aqi-card-good"
+            health_class = "health-info-good"
+        elif predicted_aqi <= 100:
+            aqi_card_class = "aqi-card-moderate"
+            health_class = "health-info-moderate"
+        elif predicted_aqi <= 150:
+            aqi_card_class = "aqi-card-usg"
+            health_class = "health-info-usg"
+        elif predicted_aqi <= 200:
+            aqi_card_class = "aqi-card-unhealthy"
+            health_class = "health-info-unhealthy"
+        elif predicted_aqi <= 300:
+            aqi_card_class = "aqi-card-very-unhealthy"
+            health_class = "health-info-very-unhealthy"
+        else:
+            aqi_card_class = "aqi-card-hazardous"
+            health_class = "health-info-hazardous"
+        
+        # AQI Display Card
+        col1, col2 = st.columns([1, 3])
         
         with col1:
-            st.metric("AQI", f"{int(predicted_aqi)}", delta=None)
+            st.markdown(f"<div class='{aqi_card_class}'>", unsafe_allow_html=True)
+            # Show disclaimer only for location-fetched data (from AQICN)
+            show_disclaimer = hasattr(st.session_state, 'aqi_city') or hasattr(st.session_state, 'aqi_location')
+            
+            if show_disclaimer:
+                st.markdown("""
+                    <div style="display: flex; align-items: center; justify-content: center;">
+                        <div style="text-align: center;">
+                            <div style="font-size: 0.875rem; color: rgba(0,0,0,0.6); font-weight: 600; margin-bottom: 4px;">Current AQI</div>
+                            <div style="font-size: 2.5rem; font-weight: 700; display: inline-block;">{}</div>
+                            <div class="tooltip-container" style="display: inline-block; vertical-align: super;">
+                                <span class="tooltip-icon">?</span>
+                                <span class="tooltip-text">
+                                    <strong>ℹ️ Data Disclaimer</strong><br><br>
+                                    AQI data sourced from <strong>AQICN</strong> (Real-time Air Quality Index).<br><br>
+                                    <strong>⚠️ Important:</strong><br>
+                                    • We do not claim ownership of this data<br>
+                                    • Always refer to official sources for critical decisions
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                """.format(int(predicted_aqi)), unsafe_allow_html=True)
+            else:
+                # No disclaimer for ML-predicted AQI
+                st.metric("Current AQI", f"{int(predicted_aqi)}", delta=None)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
         
         with col2:
+            st.markdown(f"<div class='{health_class}'>", unsafe_allow_html=True)
             if predicted_aqi <= 50:
                 st.success("🟢 **Good (0-50)**")
-                st.caption("Minimal impact. Air quality is satisfactory.")
+                st.markdown("**Health Impact:** Air quality meets standards with minimal health risk.")
+                st.markdown("**Recommendation:** Perfect day for outdoor activities. No precautions needed for general population.")
             elif predicted_aqi <= 100:
-                st.success("🟢 **Satisfactory (51-100)**")
-                st.caption("Minor breathing discomfort to sensitive people.")
+                st.info("🟡 **Moderate (51-100)**")
+                st.markdown("**Health Impact:** Acceptable air quality. Sensitive individuals may experience minor symptoms.")
+                st.markdown("**Recommendation:** Unusually sensitive people should consider limiting extended outdoor activities.")
+            elif predicted_aqi <= 150:
+                st.warning("🟠 **Unhealthy for Sensitive Groups (101-150)**")
+                st.markdown("**Health Impact:** Sensitive groups may experience health effects; general public less likely to be affected.")
+                st.markdown("**Recommendation:** Those with respiratory conditions should reduce prolonged outdoor activity. General public can continue normal activities.")
             elif predicted_aqi <= 200:
-                st.warning("🟡 **Moderate (101-200)**")
-                st.caption("Breathing discomfort to people with lungs, asthma and heart diseases.")
+                st.warning("🟠 **Unhealthy (151-200)**")
+                st.markdown("**Health Impact:** Everyone may start experiencing health effects; sensitive groups face more serious impacts.")
+                st.markdown("**Recommendation:** People with respiratory or heart conditions should avoid prolonged outdoor activity. Everyone else should limit extended outdoor exertion.")
             elif predicted_aqi <= 300:
-                st.warning("🟠 **Poor (201-300)**")
-                st.caption("Breathing discomfort on prolonged exposure. Avoid outdoor activities.")
-            elif predicted_aqi <= 400:
-                st.error("🔴 **Very Poor (301-400)**")
-                st.caption("Respiratory illness on prolonged exposure. Avoid outdoor activities.")
+                st.error("🔴 **Very Unhealthy (201-300)**")
+                st.markdown("**Health Impact:** Health alert conditions. Everyone may experience more significant health effects.")
+                st.markdown("**Recommendation:** People with respiratory or heart conditions should avoid all outdoor activity. Everyone else should severely limit outdoor exposure.")
             else:
-                st.error("🟤 **Severe (401-500)**")
-                st.caption("Affects healthy people. Serious impact on people with heart/lung disease.")
+                st.error("🟤 **Hazardous (300+)**")
+                st.markdown("**Health Impact:** Emergency health warnings. Entire population at risk of serious health effects.")
+                st.markdown("**Recommendation:** Everyone should avoid all outdoor physical activity. Stay indoors with air filtration if possible. Seek medical attention for any symptoms.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Pollutant breakdown
+        if hasattr(st.session_state, 'aqi_components') and st.session_state.aqi_components:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("### 📊 Pollutant Breakdown")
+            st.caption("Individual pollutant sub-indices contributing to overall AQI")
+            components = st.session_state.aqi_components
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if 'pm25' in components:
+                    pm25_val = components['pm25'].get('v', 0)
+                    pm25_class = get_pollutant_class(pm25_val)
+                    st.markdown(f"<div class='{pm25_class}'>", unsafe_allow_html=True)
+                    st.metric("PM2.5", pm25_val if pm25_val != 0 else 'N/A', delta="Fine Particles", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                if 'pm10' in components:
+                    pm10_val = components['pm10'].get('v', 0)
+                    pm10_class = get_pollutant_class(pm10_val)
+                    st.markdown(f"<div class='{pm10_class}'>", unsafe_allow_html=True)
+                    st.metric("PM10", pm10_val if pm10_val != 0 else 'N/A', delta="Coarse Particles", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
+            with col2:
+                if 'no2' in components:
+                    no2_val = components['no2'].get('v', 0)
+                    no2_class = get_pollutant_class(no2_val)
+                    st.markdown(f"<div class='{no2_class}'>", unsafe_allow_html=True)
+                    st.metric("NO₂", no2_val if no2_val != 0 else 'N/A', delta="Nitrogen Dioxide", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                if 'so2' in components:
+                    so2_val = components['so2'].get('v', 0)
+                    so2_class = get_pollutant_class(so2_val)
+                    st.markdown(f"<div class='{so2_class}'>", unsafe_allow_html=True)
+                    st.metric("SO₂", so2_val if so2_val != 0 else 'N/A', delta="Sulfur Dioxide", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
+            with col3:
+                if 'o3' in components:
+                    o3_val = components['o3'].get('v', 0)
+                    o3_class = get_pollutant_class(o3_val)
+                    st.markdown(f"<div class='{o3_class}'>", unsafe_allow_html=True)
+                    st.metric("O₃", o3_val if o3_val != 0 else 'N/A', delta="Ozone", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                if 'co' in components:
+                    co_val = components['co'].get('v', 0)
+                    co_class = get_pollutant_class(co_val)
+                    st.markdown(f"<div class='{co_class}'>", unsafe_allow_html=True)
+                    st.metric("CO", co_val if co_val != 0 else 'N/A', delta="Carbon Monoxide", delta_color="off")
+                    st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.aqi_predicted:
-        with st.expander("Provide Insights for Recommendations", expanded=st.session_state.aqi_predicted):
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+        with st.expander("🤖 Get AI-Powered Recommendations", expanded=False):
+            st.markdown("**Provide Context for Personalized Recommendations**")
+            st.caption("Share information about your area to receive tailored air quality improvement suggestions")
+            st.markdown("---")
             st.session_state.answers = {}
             st.session_state.answers['traffic'] = st.selectbox("Traffic Intensity", ["Select...", "Very High", "Moderate", "Low"], index=0)
             st.session_state.answers['industrial'] = st.selectbox("Proximity to Industrial Zones", ["Select...", "Within 5 km", "Within 10 km", "More than 10 km away"], index=0)
@@ -411,7 +519,7 @@ def main():
             st.session_state.answers['environmental_challenge'] = st.text_area("Significant Environmental Challenge", key="environmental_challenge", placeholder="For example, too much dust due to nearby construction or heavy traffic on main roads.")
             st.session_state.answers['area_initiatives'] = st.text_area("Recent Initiatives or Unique Aspects", key="area_initiatives", placeholder="For example, a new metro station is being built nearby.")
 
-            if st.button("Get Recommendations"):
+            if st.button("✨ Generate Recommendations", type="primary", use_container_width=True):
                 all_selected = (
                     st.session_state.answers['traffic'] != "Select..." and
                     st.session_state.answers['industrial'] != "Select..." and
@@ -420,34 +528,44 @@ def main():
                     st.session_state.answers['zoning'] is not None
                 )
                 if not all_selected:
-                    st.error("Please select an option for all fields.")
+                    st.error("⚠️ Please select an option for all dropdown fields.")
                 elif not st.session_state.answers['environmental_challenge'] or not st.session_state.answers['area_initiatives']:
-                    st.error("Please fill in all text fields.")
+                    st.error("⚠️ Please fill in all text fields.")
                 else:
-                    prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers)
-                    try:
-                        response = model.generate_content(prompt)
-                        st.write("### Recommendations")
-                        st.write(response.text)
-                        st.session_state.show_detailed_insights=True
-                    except Exception as e:
-                        st.error(f"Error generating insights: {e}")
+                    with st.spinner('🔄 Analyzing environmental data and generating personalized recommendations...'):
+                        prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers)
+                        try:
+                            response = model.generate_content(prompt)
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            st.markdown("### 💡 AI-Generated Recommendations")
+                            st.markdown("<div class='health-info'>", unsafe_allow_html=True)
+                            st.write(response.text)
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            st.session_state.show_detailed_insights=True
+                        except Exception as e:
+                            st.error(f"❌ Error generating insights: {e}")
 
         if st.session_state.show_detailed_insights:
-            st.subheader("Ask More About These Recommendations")
-            follow_up_query = st.text_input("Have a follow-up question? Ask here:", key="follow_up_query")
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("### 💬 Follow-up Questions")
+            st.caption("Ask specific questions about the recommendations above")
+            follow_up_query = st.text_input("Have a follow-up question? Ask here:", key="follow_up_query", placeholder="e.g., How can I implement these recommendations in my community?")
             
-            if st.button("Get Detailed Insights"):
+            if st.button("🔍 Get Detailed Insights", type="primary", use_container_width=True):
                 if follow_up_query.strip():
-                    follow_up_prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers, follow_up_query)
-                    try:
-                        follow_up_response = model.generate_content(follow_up_prompt)
-                        st.write("### Detailed Insights")
-                        st.write(follow_up_response.text)
-                    except Exception as e:
-                        st.error(f"Error generating insights: {e}")
+                    with st.spinner('🔄 Generating detailed insights...'):
+                        follow_up_prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers, follow_up_query)
+                        try:
+                            follow_up_response = model.generate_content(follow_up_prompt)
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            st.markdown("### 📝 Detailed Answer")
+                            st.markdown("<div class='health-info'>", unsafe_allow_html=True)
+                            st.write(follow_up_response.text)
+                            st.markdown("</div>", unsafe_allow_html=True)
+                        except Exception as e:
+                            st.error(f"❌ Error generating insights: {e}")
                 else:
-                    st.error("Please enter a valid question.")
+                    st.error("⚠️ Please enter a valid question.")
 
 if __name__ == "__main__":
     main()
