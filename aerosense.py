@@ -333,7 +333,7 @@ def main():
                                     st.session_state.aqi_city = detailed_data['city']
                                     st.session_state.aqi_location = detailed_data['location']
                                     st.session_state.scroll_to_aqi = True
-                                    st.rerun()
+                                    st.experimental_rerun()
                                 else:
                                     st.error("Failed to fetch detailed AQI data from this station")
                     
