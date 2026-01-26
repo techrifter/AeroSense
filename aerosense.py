@@ -179,6 +179,8 @@ def main():
         st.session_state.predicted_aqi = None
         st.session_state.answers = {}
         st.session_state.option = option
+        st.session_state.show_detailed_insights = False
+        st.session_state.generated_recommendations = None
         # Clear location-specific data when switching options
         if hasattr(st.session_state, 'aqi_city'):
             delattr(st.session_state, 'aqi_city')
@@ -506,67 +508,93 @@ def main():
     if st.session_state.aqi_predicted:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
+        
+        # Initialize state for generated recommendations
+        if 'generated_recommendations' not in st.session_state:
+            st.session_state.generated_recommendations = None
+        if 'generating_recommendations' not in st.session_state:
+            st.session_state.generating_recommendations = False
+        
         with st.expander("🤖 Get AI-Powered Recommendations", expanded=False):
             st.markdown("**Provide Context for Personalized Recommendations**")
             st.caption("Share information about your area to receive tailored air quality improvement suggestions")
             st.markdown("---")
             
-            # Initialize answers dictionary only if it doesn't exist
-            if 'answers' not in st.session_state:
-                st.session_state.answers = {}
-            st.session_state.answers['traffic'] = st.selectbox("Traffic Intensity", ["Select...", "Very High", "Moderate", "Low"], index=0)
-            st.session_state.answers['industrial'] = st.selectbox("Proximity to Industrial Zones", ["Select...", "Within 5 km", "Within 10 km", "More than 10 km away"], index=0)
-            st.session_state.answers['green_cover'] = st.selectbox("Green Cover", ["Select...", "Sparse", "Moderate", "Dense"], index=0)
-            st.session_state.answers['climate_initiatives'] = st.selectbox("Climate Change Initiatives", ["Select...", "None", "A few", "Actively implemented"], index=0)
-            st.session_state.answers['zoning'] = st.selectbox("Mixed Zoning (Residential + Commercial)", ["Select...", "Yes", "No"], index=0)
-            st.session_state.answers['environmental_challenge'] = st.text_area("Significant Environmental Challenge", key="environmental_challenge", placeholder="For example, too much dust due to nearby construction or heavy traffic on main roads.")
-            st.session_state.answers['area_initiatives'] = st.text_area("Recent Initiatives or Unique Aspects", key="area_initiatives", placeholder="For example, a new metro station is being built nearby.")
+            with st.form(key="recommendations_form"):
+                traffic = st.selectbox("Traffic Intensity", ["Select...", "Very High", "Moderate", "Low"], index=0)
+                industrial = st.selectbox("Proximity to Industrial Zones", ["Select...", "Within 5 km", "Within 10 km", "More than 10 km away"], index=0)
+                green_cover = st.selectbox("Green Cover", ["Select...", "Sparse", "Moderate", "Dense"], index=0)
+                climate_initiatives = st.selectbox("Climate Change Initiatives", ["Select...", "None", "A few", "Actively implemented"], index=0)
+                zoning = st.selectbox("Mixed Zoning (Residential + Commercial)", ["Select...", "Yes", "No"], index=0)
+                environmental_challenge = st.text_area("Significant Environmental Challenge", placeholder="For example, too much dust due to nearby construction or heavy traffic on main roads.")
+                area_initiatives = st.text_area("Recent Initiatives or Unique Aspects", placeholder="For example, a new metro station is being built nearby.")
 
-            if st.button("✨ Generate Recommendations", type="primary", use_container_width=True):
-                all_selected = (
-                    st.session_state.answers['traffic'] != "Select..." and
-                    st.session_state.answers['industrial'] != "Select..." and
-                    st.session_state.answers['green_cover'] != "Select..." and
-                    st.session_state.answers['climate_initiatives'] != "Select..." and
-                    st.session_state.answers['zoning'] != "Select..."
-                )
-                if not all_selected:
-                    st.error("⚠️ Please select an option for all dropdown fields.")
-                elif not st.session_state.answers['environmental_challenge'] or not st.session_state.answers['area_initiatives']:
-                    st.error("⚠️ Please fill in all text fields.")
-                else:
-                    with st.spinner('🔄 Analyzing environmental data and generating personalized recommendations...'):
-                        prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers)
-                        try:
-                            response = model.generate_content(prompt)
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            st.markdown("### 💡 AI-Generated Recommendations")
-                            st.write(response.text)
-                            st.markdown("</div>", unsafe_allow_html=True)
-                            st.session_state.show_detailed_insights=True
-                        except Exception as e:
-                            st.error(f"❌ Error generating insights: {e}")
-
-        if st.session_state.show_detailed_insights:
+                submitted = st.form_submit_button("✨ Generate Recommendations", type="primary", use_container_width=True)
+                
+                if submitted:
+                    all_selected = (
+                        traffic != "Select..." and
+                        industrial != "Select..." and
+                        green_cover != "Select..." and
+                        climate_initiatives != "Select..." and
+                        zoning != "Select..."
+                    )
+                    if not all_selected:
+                        st.error("⚠️ Please select an option for all dropdown fields.")
+                    elif not environmental_challenge or not area_initiatives:
+                        st.error("⚠️ Please fill in all text fields.")
+                    else:
+                        # Store answers in session state
+                        st.session_state.answers = {
+                            'traffic': traffic,
+                            'industrial': industrial,
+                            'green_cover': green_cover,
+                            'climate_initiatives': climate_initiatives,
+                            'zoning': zoning,
+                            'environmental_challenge': environmental_challenge,
+                            'area_initiatives': area_initiatives
+                        }
+                        st.session_state.generating_recommendations = True
+                        st.experimental_rerun()
+        
+        if st.session_state.generating_recommendations:
+            with st.spinner('🔄 Analyzing environmental data and generating personalized recommendations...'):
+                prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers)
+                try:
+                    response = model.generate_content(prompt)
+                    st.session_state.generated_recommendations = response.text
+                    st.session_state.show_detailed_insights = True
+                except Exception as e:
+                    st.error(f"❌ Error generating insights: {e}")
+                finally:
+                    st.session_state.generating_recommendations = False
+                    st.experimental_rerun()
+        
+        # Display recommendations outside the expander/form
+        if st.session_state.get('generated_recommendations'):
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("### 💬 Follow-up Questions")
-            st.caption("Ask specific questions about the recommendations above")
-            follow_up_query = st.text_input("Have a follow-up question? Ask here:", key="follow_up_query", placeholder="e.g., How can I implement these recommendations in my community?")
-            
-            if st.button("🔍 Get Detailed Insights", type="primary", use_container_width=True):
-                if follow_up_query.strip():
-                    with st.spinner('🔄 Generating detailed insights...'):
-                        follow_up_prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers, follow_up_query)
-                        try:
-                            follow_up_response = model.generate_content(follow_up_prompt)
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            st.markdown("### 🧭 Detailed Answer")
-                            st.write(follow_up_response.text)
-                            st.markdown("</div>", unsafe_allow_html=True)
-                        except Exception as e:
-                            st.error(f"❌ Error generating insights: {e}")
-                else:
-                    st.error("⚠️ Please enter a valid question.")
+            st.markdown("### Personalized Recommendations")
+            st.write(st.session_state.generated_recommendations)
+
+    if st.session_state.get('show_detailed_insights', False):
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("### Additional Inquiries")
+        st.caption("Ask specific questions about the recommendations above")
+        follow_up_query = st.text_input("Have a follow-up question? Ask here:", key="follow_up_query", placeholder="e.g., How can I implement these recommendations in my community?")
+        
+        if st.button("Get Insights", type="primary", use_container_width=True):
+            if follow_up_query.strip():
+                with st.spinner('Generating detailed insights...'):
+                    follow_up_prompt = construct_prompt(st.session_state.predicted_aqi, st.session_state.answers, follow_up_query)
+                    try:
+                        follow_up_response = model.generate_content(follow_up_prompt)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("### Expert Analysis")
+                        st.write(follow_up_response.text)
+                    except Exception as e:
+                        st.error(f"Error generating insights: {e}")
+            else:
+                st.error("Please enter a valid question.")
 
 if __name__ == "__main__":
     main()
