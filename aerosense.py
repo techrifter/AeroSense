@@ -510,7 +510,10 @@ def main():
             st.markdown("**Provide Context for Personalized Recommendations**")
             st.caption("Share information about your area to receive tailored air quality improvement suggestions")
             st.markdown("---")
-            st.session_state.answers = {}
+            
+            # Initialize answers dictionary only if it doesn't exist
+            if 'answers' not in st.session_state:
+                st.session_state.answers = {}
             st.session_state.answers['traffic'] = st.selectbox("Traffic Intensity", ["Select...", "Very High", "Moderate", "Low"], index=0)
             st.session_state.answers['industrial'] = st.selectbox("Proximity to Industrial Zones", ["Select...", "Within 5 km", "Within 10 km", "More than 10 km away"], index=0)
             st.session_state.answers['green_cover'] = st.selectbox("Green Cover", ["Select...", "Sparse", "Moderate", "Dense"], index=0)
