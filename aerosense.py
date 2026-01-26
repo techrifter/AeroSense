@@ -515,7 +515,7 @@ def main():
             st.session_state.answers['industrial'] = st.selectbox("Proximity to Industrial Zones", ["Select...", "Within 5 km", "Within 10 km", "More than 10 km away"], index=0)
             st.session_state.answers['green_cover'] = st.selectbox("Green Cover", ["Select...", "Sparse", "Moderate", "Dense"], index=0)
             st.session_state.answers['climate_initiatives'] = st.selectbox("Climate Change Initiatives", ["Select...", "None", "A few", "Actively implemented"], index=0)
-            st.session_state.answers['zoning'] = st.radio("Mixed Zoning (Residential + Commercial)", ["Yes", "No"], index=None)
+            st.session_state.answers['zoning'] = st.selectbox("Mixed Zoning (Residential + Commercial)", ["Select...", "Yes", "No"], index=0)
             st.session_state.answers['environmental_challenge'] = st.text_area("Significant Environmental Challenge", key="environmental_challenge", placeholder="For example, too much dust due to nearby construction or heavy traffic on main roads.")
             st.session_state.answers['area_initiatives'] = st.text_area("Recent Initiatives or Unique Aspects", key="area_initiatives", placeholder="For example, a new metro station is being built nearby.")
 
@@ -525,7 +525,7 @@ def main():
                     st.session_state.answers['industrial'] != "Select..." and
                     st.session_state.answers['green_cover'] != "Select..." and
                     st.session_state.answers['climate_initiatives'] != "Select..." and
-                    st.session_state.answers['zoning'] is not None
+                    st.session_state.answers['zoning'] != "Select..."
                 )
                 if not all_selected:
                     st.error("⚠️ Please select an option for all dropdown fields.")
