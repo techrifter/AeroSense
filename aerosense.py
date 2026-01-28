@@ -189,7 +189,7 @@ def main():
         if hasattr(st.session_state, 'aqi_components'):
             delattr(st.session_state, 'aqi_components')
     
-    if option == "Predict AQI from Input Parameters" and not st.session_state.aqi_predicted:
+    if option == "Predict AQI from Input Parameters":
         st.markdown("<br>", unsafe_allow_html=True)
         with st.expander("📊 Input Parameters for AQI Prediction", expanded=not st.session_state.aqi_predicted):
             st.markdown("**Enter Environmental Parameters**")
